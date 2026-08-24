@@ -1,61 +1,83 @@
 export default async (request, context) => {
   const url = new URL(request.url);
+  const pathname = url.pathname;
 
-  // 1. Tạo target URL trỏ đến máy chủ Jotform
-  const targetHost = "form.jotform.me";
-  const targetUrl = new URL(`https://${targetHost}${url.pathname}${url.search}`);
+  // 1. Xác định host đích dựa trên đường dẫn request
+  let targetHost = "form.jotform.me";
+  if (pathname.startsWith("/submit/")) {
+    targetHost = "submit.jotform.me";
+  }
 
-  // 2. Clone và thiết lập lại Headers
+  // 2. Chuyển tiếp đúng path và query parameters từ link người dùng gọi
+  const targetUrl = new URL(`https://${targetHost}${pathname}${url.search}`);
+
+  // 3. Clone và thiết lập lại Headers
   const modifiedHeaders = new Headers(request.headers);
   modifiedHeaders.set("Host", targetHost);
   modifiedHeaders.set("Referer", `https://${targetHost}/`);
   modifiedHeaders.set("Origin", `https://${targetHost}`);
-
-  // Xóa header accept-encoding để server Jotform trả về plain text (không nén gzip), 
-  // giúp Edge Function có thể đọc và thay thế chuỗi tên miền
+  // Xóa nén gzip để đọc và thay thế text HTML/JS
   modifiedHeaders.delete("accept-encoding");
 
-  // 3. Chuẩn bị options cho fetch (xử lý cả GET, POST submit form)
+  // 4. Thiết lập Fetch options (chuyển tiếp đầy đủ Body khi Submit)
   const fetchOptions = {
     method: request.method,
     headers: modifiedHeaders,
-    redirect: "manual", // Không tự động follow để xử lý header Location chuyển trang
+    redirect: "manual",
   };
 
-  // Nếu là POST/PUT (submit dữ liệu), chuyển tiếp body lên Jotform
   if (request.method !== "GET" && request.method !== "HEAD") {
     fetchOptions.body = await request.arrayBuffer();
   }
 
-  // 4. Gửi request đến Jotform
+  // 5. Gửi request sang máy chủ Jotform
   const response = await fetch(targetUrl.toString(), fetchOptions);
 
-  // 5. Xử lý trường hợp Jotform trả về Redirect (301/302 sau khi submit thành công)
+  // 6. Xử lý Header Location khi Jotform phản hồi redirect (sau submit)
   const responseHeaders = new Headers(response.headers);
   const locationHeader = responseHeaders.get("location");
+
+  const jotformHosts = [
+    "submit.jotform.com",
+    "submit.jotform.me",
+    "submit.jotformpro.com",
+    "submit.jotformeu.com",
+    "form.jotform.com",
+    "form.jotform.me",
+    "form.jotformpro.com",
+    "form.jotformz.com",
+    "www.jotform.com",
+    "cdn.jotfor.ms"
+  ];
+
   if (locationHeader) {
-    // Đổi link chuyển hướng về lại domain Netlify của bạn
-    const fixedLocation = locationHeader
-      .replaceAll(`https://${targetHost}`, `https://${url.host}`)
-      .replaceAll(targetHost, url.host);
+    let fixedLocation = locationHeader;
+    for (const host of jotformHosts) {
+      fixedLocation = fixedLocation
+        .replaceAll(`https://${host}`, `https://${url.host}`)
+        .replaceAll(`http://${host}`, `https://${url.host}`)
+        .replaceAll(host, url.host);
+    }
     responseHeaders.set("location", fixedLocation);
   }
 
-  // 6. Xử lý thay thế nội dung HTML / JS / JSON
+  // 7. Thay thế toàn bộ endpoint Submit và domain trong nội dung HTML/JS/JSON trả về
   const contentType = responseHeaders.get("content-type") || "";
   if (
     contentType.includes("text/html") ||
     contentType.includes("javascript") ||
-    contentType.includes("application/json")
+    contentType.includes("application/json") ||
+    contentType.includes("text/plain")
   ) {
     let bodyText = await response.text();
 
-    // Thay thế toàn bộ domain Jotform thành domain Netlify
-    bodyText = bodyText.replaceAll(`https://${targetHost}`, `https://${url.host}`);
-    bodyText = bodyText.replaceAll(`//${targetHost}`, `//${url.host}`);
-    bodyText = bodyText.replaceAll(targetHost, url.host);
+    for (const host of jotformHosts) {
+      bodyText = bodyText.replaceAll(`https://${host}`, `https://${url.host}`);
+      bodyText = bodyText.replaceAll(`http://${host}`, `https://${url.host}`);
+      bodyText = bodyText.replaceAll(`//${host}`, `//${url.host}`);
+      bodyText = bodyText.replaceAll(host, url.host);
+    }
 
-    // Xóa header content-length cũ do độ dài chuỗi đã thay đổi sau khi replace
     responseHeaders.delete("content-length");
 
     return new Response(bodyText, {
@@ -65,7 +87,7 @@ export default async (request, context) => {
     });
   }
 
-  // 7. Với các asset nhị phân (hình ảnh, fonts, icons), trả về trực tiếp
+  // 8. Trả về assets nhị phân (ảnh, fonts, icon)
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

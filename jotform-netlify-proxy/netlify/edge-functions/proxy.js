@@ -54,7 +54,9 @@ export default async (request, context) => {
   // Xóa các header bảo mật gắt gao chặn load ảnh/CSS trên domain lạ
   responseHeaders.delete("content-security-policy");
   responseHeaders.delete("x-frame-options");
-
+  responseHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+  responseHeaders.set("Pragma", "no-cache");
+  responseHeaders.set("Expires", "0");
   // Xử lý Location redirect khi submit thành công
   const locationHeader = responseHeaders.get("location");
   const jotformHosts = [

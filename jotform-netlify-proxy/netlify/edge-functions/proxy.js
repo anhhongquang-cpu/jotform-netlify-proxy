@@ -1,105 +1,86 @@
 export default async (request, context) => {
   const url = new URL(request.url);
-  const pathname = url.pathname;
 
-  // 1. Phân loại và định tuyến chính xác Server đích của Jotform
+  // 1. Phân loại Host đích: Nếu là submit thì trỏ về submit.jotform.me, bình thường trỏ về form.jotform.me
   let targetHost = "form.jotform.me";
-
-  if (pathname.startsWith("/submit/")) {
+  if (url.pathname.startsWith("/submit/")) {
     targetHost = "submit.jotform.me";
-  } else if (
-    pathname.startsWith("/static/") ||
-    pathname.startsWith("/themes/") ||
-    pathname.startsWith("/css/") ||
-    pathname.startsWith("/js/") ||
-    pathname.startsWith("/images/") ||
-    pathname.startsWith("/uploads/")
-  ) {
-    // Các asset giao diện, logo, background nằm trên CDN
-    targetHost = "cdn.jotfor.ms";
   }
 
-  // 2. Tạo URL đích
-  const targetUrl = new URL(`https://${targetHost}${pathname}${url.search}`);
+  const targetUrl = new URL(`https://${targetHost}${url.pathname}${url.search}`);
 
-  // 3. Chuẩn bị Headers
+  // 2. Clone và thiết lập lại Headers
   const modifiedHeaders = new Headers(request.headers);
   modifiedHeaders.set("Host", targetHost);
   modifiedHeaders.set("Referer", `https://${targetHost}/`);
   modifiedHeaders.set("Origin", `https://${targetHost}`);
-  modifiedHeaders.delete("accept-encoding"); // Bắt buộc để nhận plain text decode
 
-  // 4. Thiết lập Fetch Options
+  // Xóa header accept-encoding để server Jotform trả về plain text (không nén gzip), 
+  // giúp Edge Function có thể đọc và thay thế chuỗi tên miền
+  modifiedHeaders.delete("accept-encoding");
+
+  // 3. Chuẩn bị options cho fetch (xử lý cả GET, POST submit form)
   const fetchOptions = {
     method: request.method,
     headers: modifiedHeaders,
-    redirect: "manual",
+    redirect: "manual", // Không tự động follow để xử lý header Location chuyển trang
   };
 
+  // Nếu là POST/PUT (submit dữ liệu), chuyển tiếp body lên Jotform
   if (request.method !== "GET" && request.method !== "HEAD") {
     fetchOptions.body = await request.arrayBuffer();
   }
 
-  // 5. Gửi request sang Jotform CDN / Server
-  let response;
-  try {
-    response = await fetch(targetUrl.toString(), fetchOptions);
-  } catch (err) {
-    return new Response("Proxy fetch failed: " + err.message, { status: 502 });
-  }
+  // 4. Gửi request đến Jotform
+  const response = await fetch(targetUrl.toString(), fetchOptions);
 
-  // 6. Xử lý Headers trả về
+  // 5. Xử lý trường hợp Jotform trả về Redirect (301/302 sau khi submit thành công)
   const responseHeaders = new Headers(response.headers);
-  
-  // Xóa các header bảo mật gắt gao chặn load ảnh/CSS trên domain lạ
-  responseHeaders.delete("content-security-policy");
-  responseHeaders.delete("x-frame-options");
-  responseHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
-  responseHeaders.set("Pragma", "no-cache");
-  responseHeaders.set("Expires", "0");
-  // Xử lý Location redirect khi submit thành công
   const locationHeader = responseHeaders.get("location");
-  const jotformHosts = [
-    "submit.jotform.com",
-    "submit.jotform.me",
-    "submit.jotformpro.com",
-    "submit.jotformeu.com",
-    "form.jotform.com",
-    "form.jotform.me",
-    "form.jotformpro.com",
-    "form.jotformz.com",
-    "www.jotform.com",
-    "cdn.jotfor.ms",
-    "files.jotform.com"
-  ];
-
   if (locationHeader) {
     let fixedLocation = locationHeader;
+    const jotformHosts = [
+      "submit.jotform.com",
+      "submit.jotform.me",
+      "submit.jotformpro.com",
+      "form.jotform.com",
+      "form.jotform.me",
+      "form.jotformpro.com"
+    ];
     for (const host of jotformHosts) {
       fixedLocation = fixedLocation
         .replaceAll(`https://${host}`, `https://${url.host}`)
-        .replaceAll(`http://${host}`, `https://${url.host}`)
         .replaceAll(host, url.host);
     }
     responseHeaders.set("location", fixedLocation);
   }
 
-  // 7. Thay thế toàn bộ domain trong nội dung Text (HTML / CSS / JS / JSON)
+  // 6. Xử lý thay thế nội dung HTML / JS / JSON
   const contentType = responseHeaders.get("content-type") || "";
   if (
-    contentType.includes("text/") ||
+    contentType.includes("text/html") ||
     contentType.includes("javascript") ||
     contentType.includes("application/json")
   ) {
     let bodyText = await response.text();
 
-    for (const host of jotformHosts) {
+    // Thay thế toàn bộ domain Jotform (gồm cả domain form và domain submit) thành domain Netlify
+    const hostsToReplace = [
+      "submit.jotform.com",
+      "submit.jotform.me",
+      "submit.jotformpro.com",
+      "form.jotform.com",
+      "form.jotform.me",
+      "form.jotformpro.com"
+    ];
+
+    for (const host of hostsToReplace) {
       bodyText = bodyText.replaceAll(`https://${host}`, `https://${url.host}`);
-      bodyText = bodyText.replaceAll(`http://${host}`, `https://${url.host}`);
       bodyText = bodyText.replaceAll(`//${host}`, `//${url.host}`);
       bodyText = bodyText.replaceAll(host, url.host);
     }
 
+    // Xóa header content-length cũ do độ dài chuỗi đã thay đổi sau khi replace
     responseHeaders.delete("content-length");
 
     return new Response(bodyText, {
@@ -109,7 +90,7 @@ export default async (request, context) => {
     });
   }
 
-  // 8. Trả về assets nhị phân (Ảnh nền giọt nước, logo PNG/JPG, font icon)
+  // 7. Với các asset nhị phân (hình ảnh, fonts, icons), trả về trực tiếp
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
